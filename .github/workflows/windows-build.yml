@@ -46,6 +46,9 @@ jobs:
         with:
           python-version: "3.10"
 
+      # The repo does not commit Cargo.lock (see ci.yml); this branch carries
+      # the lock file the MariaDB adapter was tested with, so --locked builds
+      # the same dependency versions.
       - name: Build dbt-core wheel
         shell: bash
         run: |
