@@ -1,0 +1,91 @@
+# Builds a Windows dbt-core wheel and the ADBC MySQL driver DLL from this
+# branch, for local MariaDB adapter testing. Mirrors the dbt-core maturin
+# step of release-v2.yml on a standard GitHub-hosted runner. Not part of the
+# MariaDB adapter PR.
+name: Windows build (MariaDB testing)
+
+on:
+  push:
+    branches:
+      - ci/windows-build
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: windows-latest
+    timeout-minutes: 180
+    env:
+      CARGO_INCREMENTAL: 0
+      RUST_BACKTRACE: 1
+    steps:
+      # Same fixups as release-v2.yml: no CRLF conversion, long paths.
+      - name: Fixup Git
+        run: |
+          git config --global core.autocrlf false
+          git config --system core.longpaths true
+
+      - uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955 # actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # dtolnay/rust-toolchain@stable
+
+      - name: Install Protocol Buffer Compiler
+        shell: pwsh
+        run: |
+          $PB_VERSION = "29.4"
+          $PB_URL = "https://github.com/protocolbuffers/protobuf/releases/download/v$PB_VERSION/protoc-$PB_VERSION-win64.zip"
+          $extractPath = "$env:TEMP\protoc"
+          Invoke-WebRequest -OutFile "$env:TEMP\protoc.zip" $PB_URL
+          Expand-Archive -Path "$env:TEMP\protoc.zip" -DestinationPath $extractPath -Force
+          echo "$extractPath\bin" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.10"
+
+      - name: Build dbt-core wheel
+        shell: bash
+        run: |
+          python -m venv .maturin-venv
+          .maturin-venv/Scripts/python -m pip install --upgrade pip "maturin>=1.0,<2.0"
+          .maturin-venv/Scripts/maturin build --release --locked \
+            --target x86_64-pc-windows-msvc \
+            --interpreter python \
+            -m crates/dbt-sa-python/Cargo.toml \
+            --out target/wheels
+          ls -la target/wheels/
+
+      # The commit the MariaDB adapter was tested with.
+      - name: Check out the ADBC MySQL driver
+        uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955 # actions/checkout@v4
+        with:
+          repository: adbc-drivers/mysql
+          ref: 4f13448fc0e1612c1692a97eaa139801b518b5d9
+          path: adbc-mysql
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: adbc-mysql/go/go.mod
+          cache: false
+
+      - name: Build adbc_driver_mysql.dll
+        shell: bash
+        working-directory: adbc-mysql/go/pkg
+        env:
+          CGO_ENABLED: "1"
+        run: |
+          gcc --version
+          mkdir -p "$GITHUB_WORKSPACE/driver"
+          go build -buildmode=c-shared -tags driverlib -o "$GITHUB_WORKSPACE/driver/adbc_driver_mysql.dll" .
+          ls -la "$GITHUB_WORKSPACE/driver"
+
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # actions/upload-artifact@v4
+        with:
+          name: dbt-mariadb-windows
+          path: |
+            target/wheels/*.whl
+            driver/adbc_driver_mysql.dll
+          if-no-files-found: error
